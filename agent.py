@@ -1,186 +1,218 @@
 import os
 import subprocess
-import shutil
 import re
-from typing import List, Optional
+from typing import List
 
-# Define file paths as constants
-C_CODE_FILE = "c_code/sample.c"
-FIXED_FILE = "fixes/sample_fixed.c"
-TEST_FILE = "tests/test_sample.c"
-EXECUTABLE_FILE = os.path.abspath("tests/test_exec.exe")
-
+# File paths (using raw strings for Windows paths)
+C_CODE_FILE = r"c_code\sample.c"
+FIXED_FILE = r"fixes\sample_fixed.c"
+TEST_FILE = r"tests\test_sample.c"
+EXECUTABLE_FILE = os.path.abspath(r"tests\test_exec.exe")
 
 def run_cppcheck(file_path: str) -> str:
-    """
-    Run cppcheck static analyzer on the given C source file.
-    
-    Args:
-        file_path (str): Path to the C source file.
-        
-    Returns:
-        str: The stderr output from cppcheck containing warnings/errors.
-    """
-    result = subprocess.run(
-        ["cppcheck", "--enable=all", "--quiet", file_path],
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False
-    )
-    return result.stderr
-
+    """Run static analysis using cppcheck."""
+    print(f"🔍 Running cppcheck on {file_path}...")
+    try:
+        result = subprocess.run(
+            ["cppcheck", "--enable=all", "--quiet", file_path],
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        return result.stderr
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Cppcheck warning: {e.stderr}")
+        return e.stderr
+    except FileNotFoundError:
+        print("❌ Cppcheck not found. Please install it first.")
+        exit(1)
 
 def run_gcc_syntax_check(file_path: str) -> str:
-    """
-    Run GCC compiler syntax check on the given C source file.
+    """Run GCC syntax-only check."""
+    print(f"🔍 Running GCC syntax check on {file_path}...")
+    try:
+        result = subprocess.run(
+            ["gcc", "-fsyntax-only", file_path],
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        return result.stderr
+    except subprocess.CalledProcessError as e:
+        return e.stderr
+    except FileNotFoundError:
+        print("❌ GCC not found. Please install it first.")
+        exit(1)
+
+def read_code() -> str:
+    """Read original C source code."""
+    if not os.path.exists(C_CODE_FILE):
+        print(f"❌ Missing input file: {C_CODE_FILE}")
+        print("Please create a 'c_code' folder and add sample.c")
+        exit(1)
     
-    Args:
-        file_path (str): Path to the C source file.
-        
-    Returns:
-        str: The stderr output from GCC containing syntax errors.
-    """
-    result = subprocess.run(
-        ["gcc", "-fsyntax-only", file_path],
-        stderr=subprocess.PIPE,
+    with open(C_CODE_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+        if not content.strip():
+            print("❌ The C file is empty")
+            exit(1)
+        return content
+
+def send_to_mistral(c_code: str, cppcheck_output: str, gcc_output: str) -> str:
+    """Send code and errors to local Mistral model via Ollama."""
+    # Verify Ollama is running
+    try:
+        subprocess.run(["ollama", "--version"], 
+                      check=True, 
+                      stdout=subprocess.PIPE, 
+                      stderr=subprocess.PIPE)
+    except:
+        print("❌ Ollama not running! Please start it first with 'ollama serve'")
+        exit(1)
+
+    # Build the prompt safely
+    prompt_parts = [
+        "You are a C programming expert. Analyze this code:\n\n",
+        "C CODE:\n```c\n", c_code, "\n```\n\n",
+        "STATIC ANALYSIS (cppcheck):\n", cppcheck_output, "\n\n",
+        "COMPILER ERRORS (gcc):\n", gcc_output, "\n\n",
+        "Provide ONLY the corrected C code inside a code block (```c). "
+        "Include all original code with fixes applied."
+    ]
+    prompt = "".join(prompt_parts)
+
+    print("🤖 Querying Mistral (this may take a moment)...")
+    try:
+        result = subprocess.run(
+        ["ollama", "run", "mistral"],
+        input=prompt,
+        capture_output=True,
         text=True,
-        check=False
-    )
-    return result.stderr
-
-
-def suggest_fix(cppcheck_output: str, gcc_output: str) -> List[str]:
-    """
-    Generate fix suggestions based on cppcheck and gcc outputs.
-    
-    Args:
-        cppcheck_output (str): Output from cppcheck static analysis.
-        gcc_output (str): Output from gcc syntax check.
+        encoding='utf-8',  # Add this
+        errors='replace'   # Replace undecodable chars
+)
         
-    Returns:
-        List[str]: List of human-readable suggestions.
-    """
-    suggestions = []
+        if result.returncode != 0:
+            print(f"❌ Ollama error: {result.stderr}")
+            exit(1)
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        print("❌ Ollama timed out after 2 minutes")
+        exit(1)
 
-    # Cppcheck suggestions
-    if "missingIncludeSystem" in cppcheck_output:
-        suggestions.append("➡️ Suggestion: Ensure all system headers like <stdio.h> are included and correctly spelled.")
-
-    if "unusedFunction" in cppcheck_output:
-        suggestions.append("➡️ Suggestion: Function defined but never used; consider removing or invoking it.")
-
-    # GCC error suggestions
-    if "expected ';'" in gcc_output:
-        match = re.search(r"error: expected '(.*?)' before", gcc_output)
-        if match:
-            suggestions.append(f"➡️ Syntax Error: Missing `{match.group(1)}`; check preceding line for missing delimiter.")
-
-    if "undeclared" in gcc_output:
-        match = re.search(r"'(.+?)' undeclared", gcc_output)
-        if match:
-            suggestions.append(f"➡️ Undeclared identifier: `{match.group(1)}` might be undefined or missing a declaration.")
-
-    return suggestions
-
-
-def generate_fixed_code(original_path: str, fixed_path: str) -> None:
-    """
-    Copy original source code to fixed code path.
-    Placeholder for future smart fix implementation.
+def extract_fixed_code(response: str) -> str:
+    """Extract fixed C code from LLM response."""
+    # More robust pattern matching
+    patterns = [
+        r"```c\n(.*?)```",  # Standard code block
+        r"```\n(.*?)```",    # Code block without language
+        r"```(.*?)```"        # Most flexible
+    ]
     
-    Args:
-        original_path (str): Path to original source code.
-        fixed_path (str): Destination path for fixed code.
-    """
-    shutil.copyfile(original_path, fixed_path)
+    for pattern in patterns:
+        match = re.search(pattern, response, re.DOTALL)
+        if match:
+            code = match.group(1).strip()
+            if code:  # Verify we got actual code
+                return code
+    
+    print("❌ No valid code block found in response")
+    print("Debug: First 200 chars of response:")
+    print(response[:200])
+    exit(1)
 
+def write_fixed_code(code: str):
+    """Write corrected C code to the fixes folder."""
+    os.makedirs("fixes", exist_ok=True)
+    with open(FIXED_FILE, "w", encoding="utf-8") as f:
+        f.write(code)
+    print(f"✅ Fixed code saved to: {FIXED_FILE}")
 
-def generate_test_file() -> None:
-    """
-    Generate a simple unit test file for the fixed source code.
-    Creates the tests directory if it does not exist.
-    """
+def generate_test_file():
     os.makedirs("tests", exist_ok=True)
     with open(TEST_FILE, "w") as f:
         f.write('#include <assert.h>\n')
-        f.write('#include "../fixes/sample_fixed.c"\n\n')
-        f.write("int main() {\n")
-        f.write("    assert(add(2, 3) == 5);\n")
-        f.write("    assert(add(0, 0) == 0);\n")
-        f.write("    return 0;\n")
-        f.write("}\n")
-
+        f.write('// Include only specific functions, not the entire file\n')
+        f.write('int add(int a, int b); // Forward declaration\n\n')
+        f.write('int test_main() {\n')  # Renamed from main()
+        f.write('    assert(add(2, 3) == 5);\n')
+        f.write('    assert(add(-1, 1) == 0);\n')
+        f.write('    return 0;\n')
+        f.write('}\n\n')
+        f.write('int main() { return test_main(); }')  # Wrapper
 
 def compile_and_run_tests() -> bool:
-    """
-    Compile the generated test file and run the resulting executable.
-    
-    Returns:
-        bool: True if tests pass (exit code 0), False otherwise.
-    """
-    compile_cmd = ["gcc", TEST_FILE, "-o", EXECUTABLE_FILE]
-    compile_result = subprocess.run(compile_cmd, stderr=subprocess.PIPE, text=True)
-
-    if compile_result.returncode != 0:
-        print(f"❌ Compilation failed:\n{compile_result.stderr}")
-        return False
-
+    """Compile and execute the test file."""
+    print("🛠️ Compiling tests...")
     try:
-        test_result = subprocess.run([EXECUTABLE_FILE], capture_output=True)
-        return test_result.returncode == 0
-    except FileNotFoundError:
-        print("❌ Executable not found. Test run aborted.")
+        # Compile both files together
+        compile_result = subprocess.run(
+            ["gcc", TEST_FILE, FIXED_FILE, "-o", EXECUTABLE_FILE],
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30  # Added timeout
+        )
+        if compile_result.returncode != 0:
+            print(f"❌ Compilation failed:\n{compile_result.stderr}")
+            return False
+    except Exception as e:
+        print(f"❌ Compilation error: {str(e)}")
         return False
 
+    print("🚀 Running tests...")
+    try:
+        result = subprocess.run(
+            [EXECUTABLE_FILE],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("✅ All tests passed!")
+            return True
+        else:
+            print(f"❌ Tests failed:\n{result.stderr}")
+            return False
+    except Exception as e:
+        print(f"❌ Test execution failed: {str(e)}")
+        return False
 
-def main() -> None:
-    """
-    Main workflow: runs static analysis, suggests fixes, attempts basic auto-fix,
-    generates and runs unit tests, then summarizes results.
-    """
-    os.makedirs("fixes", exist_ok=True)
+def main():
+    print("\n" + "="*50)
+    print("🛠️ C Code Debugger Agent")
+    print("="*50 + "\n")
 
-    print("🔍 Running static analysis with cppcheck...")
+    # 1. Analysis Phase
+    print("\n=== PHASE 1: CODE ANALYSIS ===")
+    c_code = read_code()
     cppcheck_output = run_cppcheck(C_CODE_FILE)
-    if cppcheck_output:
-        print("📝 Cppcheck output:\n", cppcheck_output)
-    else:
-        print("✅ No issues found by cppcheck.")
-
-    print("🔍 Running GCC syntax check...")
     gcc_output = run_gcc_syntax_check(C_CODE_FILE)
-    if gcc_output:
-        print("🛑 GCC syntax errors:\n", gcc_output)
+    
+    if not cppcheck_output and not gcc_output:
+        print("✅ No issues found by static analysis")
     else:
-        print("✅ GCC syntax check passed without errors.")
+        print(f"⚠️  Analysis found issues:\n"
+              f"Cppcheck: {len(cppcheck_output)} chars\n"
+              f"GCC: {len(gcc_output)} chars")
 
-    suggestions = suggest_fix(cppcheck_output, gcc_output)
-    if suggestions:
-        print("\n💡 Suggested fixes:")
-        for suggestion in suggestions:
-            print(suggestion)
-    else:
-        print("\n⚠️ No fix suggestions generated. Manual review recommended.")
+    # 2. Fixing Phase
+    print("\n=== PHASE 2: AI CODE FIXING ===")
+    mistral_response = send_to_mistral(c_code, cppcheck_output, gcc_output)
+    fixed_code = extract_fixed_code(mistral_response)
+    write_fixed_code(fixed_code)
 
-    if gcc_output:
-        print("\n❌ Compilation errors detected. Please fix errors before proceeding.")
-        return
-
-    print("\n⚙️ Applying auto-fix (currently copies original code)...")
-    generate_fixed_code(C_CODE_FILE, FIXED_FILE)
-    print(f"✅ Fixed code saved to: {FIXED_FILE}")
-
-    print("\n🧪 Generating and running unit tests...")
+    # 3. Testing Phase
+    print("\n=== PHASE 3: VALIDATION ===")
     generate_test_file()
     tests_passed = compile_and_run_tests()
 
-    print("\n📋 Summary Report")
-    print("────────────────────────")
-    print(f"🧠 Bugs detected       : {'Yes' if cppcheck_output else 'No'}")
-    print(f"🛠️ Fix suggestions     : {'Available' if suggestions else 'None'}")
-    print(f"🧪 Unit tests passed   : {'✅ Yes' if tests_passed else '❌ No'}")
-    print(f"📄 Fixed code location : {FIXED_FILE if os.path.exists(FIXED_FILE) else 'N/A'}")
-
+    # Final Report
+    print("\n" + "="*50)
+    print("📋 FINAL REPORT")
+    print("="*50)
+    print(f"Static analysis issues: {'Yes' if cppcheck_output or gcc_output else 'No'}")
+    print(f"AI fix generated: ✅ Success")
+    print(f"Unit tests: {'✅ Passed' if tests_passed else '❌ Failed'}")
+    print(f"\nFixed code location: {os.path.abspath(FIXED_FILE)}")
 
 if __name__ == "__main__":
     main()
