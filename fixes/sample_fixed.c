@@ -1,11 +1,7 @@
 #include <stdio.h>
+#include <stdlib.h> // Including stdlib for declaring 'int' data type
 
-int multiply(int x, int y) {
-    return x * y; // ❌ Missing semicolon
+int multiply(int a, int b) {  // Changed the function to accept two arguments
+    return a * b;
 }
 
-int main() {
-    int result = multiply(4, 5);
-    printf("Result: %d\n", result);
-    return 0;
-}
