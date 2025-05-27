@@ -69,12 +69,25 @@ def send_to_mistral(c_code: str, cppcheck_output: str, gcc_output: str) -> str:
         exit(1)
 
     prompt_parts = [
-        "You are a C programming expert. Analyze this code:\n\n",
-        "C CODE:\n```c\n", c_code, "\n```\n\n",
-        "STATIC ANALYSIS (cppcheck):\n", cppcheck_output, "\n\n",
-        "COMPILER ERRORS (gcc):\n", gcc_output, "\n\n",
-        "Provide ONLY the corrected C code inside a code block (```c). "
-        "Include all original code with fixes applied."
+    "You are a C programming expert tasked with reviewing and correcting C code. ",
+    "Your job is to fix **all** types of issues including:\n",
+    "- Syntax errors (e.g., missing semicolons, undeclared variables)\n",
+    "- Logical/semantic errors (e.g., wrong number of arguments, invalid operations)\n",
+    "- Function definitions and main function behavior\n",
+    "- Any compilation or analysis issues\n\n",
+    
+    "You must:\n",
+    "- Preserve the original intent and logic\n",
+    "- Ensure the fixed code compiles cleanly with GCC\n",
+    "- Pass any existing test cases\n\n",
+    
+    "DO NOT skip any errors — fix everything visible in the code or errors.\n\n",
+    
+    "C CODE:\n```c\n", c_code, "\n```\n\n",
+    "STATIC ANALYSIS OUTPUT (cppcheck):\n", cppcheck_output, "\n\n",
+    "COMPILER ERRORS (gcc):\n", gcc_output, "\n\n",
+
+    "Return ONLY the **fully fixed** code inside a code block (```c ... ```), and do not explain anything else."
     ]
     prompt = "".join(prompt_parts)
 
@@ -129,7 +142,10 @@ def write_fixed_code(code: str):
 
 def generate_test_file():
     os.makedirs("tests", exist_ok=True)
-    with open(TEST_FILE, "w") as f:
+    if os.path.exists(TEST_FILE):
+        print(f"ℹ️ Test file {TEST_FILE} already exists, skipping generation.")
+        return
+    with open(TEST_FILE, "w", encoding="utf-8") as f:
         f.write('#include <assert.h>\n')
         f.write('#include "../fixes/sample_fixed.c"\n\n')
         f.write('void test_add() {\n')
@@ -140,6 +156,7 @@ def generate_test_file():
         f.write('    test_add();\n')
         f.write('    return 0;\n')
         f.write('}\n')
+
 
 
 def compile_and_run_tests() -> bool:
@@ -199,4 +216,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
