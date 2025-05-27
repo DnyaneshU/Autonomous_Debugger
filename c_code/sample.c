@@ -1,11 +1,12 @@
 #include <stdio.h>
 
-int multiply(int x, int y) {
-    return x * y; // ❌ Missing semicolon
+int multiply(int b) {
+    return a * b;
 }
 
 int main() {
-    int result = multiply(4, 5);
-    printf("Result: %d\n", result);
+    int result = multiply(3, 4);
+    printf("Result is: %d\n", result)
     return 0;
 }
+
